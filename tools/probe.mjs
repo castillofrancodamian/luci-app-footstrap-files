@@ -327,7 +327,7 @@ await bar('Up'); await page.waitForTimeout(2000);
 await onRouter('/bin/sh', [ '-c', `printf one > ${DIR}/one.txt; printf two > ${DIR}/two.txt` ]);
 await bar('Refresh'); await page.waitForTimeout(1500);
 
-await page.locator('.tr.fsf-row', { hasText: 'one.txt' }).first().click({ modifiers: [ 'Control' ] });
+await page.locator('.tr.fsf-row', { hasText: 'one.txt' }).first().click({ modifiers: [ 'ControlOrMeta' ] });
 await page.waitForTimeout(800);
 ok('Ctrl+click selects without opening', (await page.locator('.fsf-row.fsf-sel').count()) === 1);
 ok('and the mode turns itself on', (await page.locator('.fsf-selcount').count()) === 1);
