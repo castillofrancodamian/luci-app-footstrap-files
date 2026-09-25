@@ -18,14 +18,16 @@
  * price of the SDK having no node — and both are checked: t0.sh parses the jsmin output, this file
  * parses its own.
  *
- * THE SEAM NAMES ARE RESERVED, AND THE LIST IS DERIVED. Terser never RENAMES a free variable like
- * `L`, but it will happily CREATE one: handed the file on its own, it takes the top level for
- * global scope and `L` for a name nobody declared, i.e. one it may give to a mangled variable. So
- * the free variables of the SOURCE are reserved, computed per file rather than listed — a new seam
- * name cannot be forgotten because nothing here names them. Adapted from luci-theme-footstrap's
- * tools/minify-js.mjs; bump them together. */
+ * THE LuCI WRAPPER IS REBUILT AROUND THE FILE BEFORE TERSER SEES IT. luci.js evaluates a resource
+ * file as `function(window, document, L, <one arg per require pragma>) { … }`, so its top level is
+ * a function body with those names already bound. Handed the bare file, terser takes the top level
+ * for global scope, `L` for a name nobody declared, and is free to give `L` to a mangled `const` —
+ * a redeclaration of the parameter and a SyntaxError before a line runs. Wrapped in the same
+ * function, terser's own scope analysis sees the parameters (reserved, so they keep their names)
+ * and every global the file reads, and never hands one of them out. Adapted from
+ * luci-theme-footstrap's tools/minify-js.mjs; bump them together. */
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, sep } from 'node:path';
 import * as acorn from 'acorn';
 import { minify } from 'terser';
 
@@ -37,18 +39,11 @@ if (!roots.length) {
 	process.exit(2);
 }
 
-const files = [];
-const walk = (p) => {
-	const st = statSync(p);
-	/* `vendor/` is skipped by NAME rather than by handing this a file list: a directory is what the
-	 * caller passes, and a new vendored tree under it must not become ours to minify by default. */
-	if (st.isDirectory()) {
-		if (basename(p) === 'vendor') return;
-		readdirSync(p).forEach((f) => walk(join(p, f)));
-	}
-	else if (p.endsWith('.js')) files.push(p);
-};
-roots.forEach(walk);
+/* `vendor/` is skipped by PATH rather than by handing this a file list: a directory is what the
+ * caller passes, and a new vendored tree under it must not become ours to minify by default. */
+const files = roots.flatMap((r) => statSync(r).isDirectory()
+	? readdirSync(r, { recursive: true }).filter((f) => f.endsWith('.js') && !f.split(sep).includes('vendor')).map((f) => join(r, f))
+	: [ r ]);
 
 /* A minifier handed nothing must not exit 0. The step this replaces globbed a path that matched no
  * file and said nothing, and a release shipped the sources verbatim. */
@@ -57,94 +52,23 @@ if (!files.length) {
 	process.exit(1);
 }
 
-/* Walk every node of an acorn AST. Hand-rolled because acorn-walk is not a dependency and this
- * is the whole of what would be used from it: recurse into anything that looks like a node. */
-function walkAst(node, visit) {
-	if (!node || typeof node.type !== 'string') return;
-	visit(node);
-	for (const k of Object.keys(node)) {
-		if (k === 'type' || k === 'start' || k === 'end' || k === 'loc') continue;
-		const v = node[k];
-		if (Array.isArray(v)) v.forEach((c) => walkAst(c, visit));
-		else walkAst(v, visit);
-	}
-}
-
-/* Every name the file BINDS, anywhere and at any depth. Deliberately scope-blind: this feeds a
- * subtraction, and over-collecting here can only shrink the reserved set's input, never invent a
- * free name that is not one. */
-function boundNames(ast) {
-	const out = new Set();
-	const fromPattern = (p) => walkAst(p, (n) => {
-		if (n.type === 'Identifier') out.add(n.name);
-		/* a property KEY inside a destructuring pattern binds nothing: `{ a: b }` binds b */
-		if (n.type === 'Property' && !n.computed && n.key && n.key.type === 'Identifier') out.delete(n.key.name);
-	});
-	walkAst(ast, (n) => {
-		if (n.type === 'VariableDeclarator') fromPattern(n.id);
-		else if (n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression' ||
-		         n.type === 'ArrowFunctionExpression' || n.type === 'ClassDeclaration' ||
-		         n.type === 'ClassExpression') {
-			if (n.id) out.add(n.id.name);
-			(n.params || []).forEach(fromPattern);
-		}
-		else if (n.type === 'CatchClause' && n.param) fromPattern(n.param);
-	});
-	return out;
-}
-
-/* Names the file USES but never binds — its seam with the LuCI wrapper and with the browser.
- * These are exactly the names terser must not hand to one of its own variables. */
-function freeNames(src) {
-	const ast = acorn.parse(src, ACORN);
-	const bound = boundNames(ast);
-	const used = new Set();
-	walkAst(ast, (n) => {
-		if (n.type === 'MemberExpression' && !n.computed && n.property) n.property._notARef = true;
-		/* `{ E }` is BOTH the key and a reference to E — a shorthand key must stay a reference */
-		if (n.type === 'Property' && !n.computed && !n.shorthand && n.key) n.key._notARef = true;
-		if (n.type === 'LabeledStatement' && n.label) n.label._notARef = true;
-		if (n.type === 'BreakStatement' && n.label) n.label._notARef = true;
-		if (n.type === 'ContinueStatement' && n.label) n.label._notARef = true;
-		if (n.type === 'Identifier' && !n._notARef) used.add(n.name);
-	});
-	return new Set([ ...used ].filter((n) => !bound.has(n)));
-}
-
-/* The wrapper's parameters, which are bound whether the file mentions them or not — the half a
- * "free variables of the source" answer gets wrong. luci.js evaluates a resource file as
- * `function(window, document, L, <one arg per require pragma>) { … }`, so those names are already
- * declared in the scope terser minifies into: a file that never reads `L` outside a comment is not
- * free of it by any AST measure, and terser handing `L` to a top-level `const` is a redeclaration
- * of the parameter and a SyntaxError before a line of it runs.
- *
- * The alias is derived exactly the way luci.js derives it, so this list cannot drift. `E` and `_`
- * are not parameters — luci.js puts them on `window` — and are reserved anyway: the difference
- * between "harmless shadowing" and "the element factory is gone" is whether some later line reads
- * one from a place the AST cannot see, and this page builds every row with E(). */
+/* The wrapper's parameters, derived exactly the way luci.js derives them, so this list cannot
+ * drift. */
 function wrapperParams(src) {
-	const names = new Set([ 'window', 'document', 'L', 'E', '_' ]);
+	const names = [ 'window', 'document', 'L' ];
 	for (const d of directives(src).split('\n')) {
 		const m = /^require[ \t]+(\S+)(?:[ \t]+as[ \t]+([a-zA-Z_]\S*))?$/.exec(d);
-		if (m) names.add(m[2] || m[1].replace(/[^a-zA-Z0-9_]/g, '_'));
+		if (m) names.push(m[2] || m[1].replace(/[^a-zA-Z0-9_]/g, '_'));
 	}
 	return names;
 }
 
-/* What the file DECLARES at its own top level — not in a nested scope, which is somebody else's
- * business. A module that shadows a wrapper name deliberately (browser.js and hex.js define their
- * own `E()`, the one that closes luci-base's markup sink) owns that name: it must not be reserved,
- * or terser is forbidden from touching a binding the file made, and the clash check below reads a
- * deliberate declaration as the accident it is meant to catch. */
-function topLevelNames(src) {
-	const out = new Set();
-	for (const n of acorn.parse(src, ACORN).body) {
-		if (n.type === 'FunctionDeclaration' || n.type === 'ClassDeclaration') { if (n.id) out.add(n.id.name); }
-		else if (n.type === 'VariableDeclaration')
-			for (const d of n.declarations)
-				if (d.id.type === 'Identifier') out.add(d.id.name);
-	}
-	return out;
+/* `src` as the body of the function luci.js builds, and the body back out of terser's output. */
+const WRAP = '__luci_wrapper__';
+const wrap = (params, src) => `var ${WRAP}=function(${params.join(',')}){${src}\n};`;
+function unwrap(code) {
+	const fn = acorn.parse(code, ACORN).body[0].declarations[0].init;
+	return code.slice(fn.body.start + 1, fn.body.end - 1);
 }
 
 /* the leading run of string-literal ExpressionStatements: 'use strict' + the require pragmas */
@@ -164,29 +88,26 @@ let before = 0, after = 0, failed = 0;
 for (const f of files) {
 	const name = basename(f);
 	const src = readFileSync(f, 'utf8');
-	/* the two halves of "names this scope already has": what the file reads without binding, and
-	 * what the LuCI wrapper binds for it whether it reads them or not */
-	const own = topLevelNames(src);
-	const free = new Set([ ...freeNames(src), ...wrapperParams(src) ].filter((n) => !own.has(n)));
-	const res = await minify(src, {
-		parse: { bare_returns: true },
-		/* directives:false = do NOT remove them — the pragmas ARE directives */
-		compress: { directives: false, toplevel: true, passes: 3 },
-		mangle: { toplevel: true, reserved: [ ...free ] },
-	});
-	const min = res.code;
+	const params = wrapperParams(src);
+	let min;
 	try {
-		acorn.parse(min, ACORN);
+		const res = await minify(wrap(params, src), {
+			/* directives:false = do NOT remove them — the pragmas ARE directives */
+			compress: { directives: false, passes: 3, keep_fargs: true },
+			/* `E` and `_` are globals, not parameters, and a file that never reads one could have a
+			 * local take its name — harmless until a later line reads it from somewhere the minifier
+			 * cannot see, and this page builds every row with E(). */
+			mangle: { reserved: [ ...params, 'E', '_' ] },
+		});
+		min = unwrap(res.code);
+		/* Parsed AS the wrapper, which is what catches a mangled name declared over a parameter:
+		 * "Identifier 'L' has already been declared" is a parse error of the function, not of the
+		 * body on its own. */
+		acorn.parse(wrap(params, min), ACORN);
 		/* a lost require pragma raises nothing at minify time: the module would simply load with no
 		 * dependencies, on the router, for good */
 		if (directives(min) !== directives(src))
 			throw new Error('directive prologue changed — a require pragma was lost');
-		/* The one that matters most: a name the source only USES must not come back DECLARED.
-		 * `const L = …` in the output shadows the wrapper's parameter and the module dies at parse
-		 * time with "Identifier 'L' has already been declared". */
-		const clash = [ ...boundNames(acorn.parse(min, ACORN)) ].filter((n) => free.has(n));
-		if (clash.length)
-			throw new Error(`the minifier declared ${clash.join(', ')} — a name this file gets from the LuCI wrapper`);
 		/* a floor, not a budget: an empty or truncated write must not ship */
 		if (!min || min.length < 100 || min.length >= src.length)
 			throw new Error(`implausible output size ${min && min.length} (source ${src.length})`);

@@ -22,7 +22,7 @@
  *
  * Verified on the stand with the packaged bytes: the editor opens, uci highlights, find-and-replace
  * counts its matches, and T2 passes 44/44. */
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import * as acorn from 'acorn';
 import { minify } from 'terser';
@@ -35,9 +35,7 @@ if (!root) {
 	process.exit(2);
 }
 
-const files = [];
-const walk = (p) => statSync(p).isDirectory() ? readdirSync(p).forEach((f) => walk(join(p, f))) : p.endsWith('.js') && files.push(p);
-walk(root);
+const files = readdirSync(root, { recursive: true }).filter((f) => f.endsWith('.js')).map((f) => join(root, f));
 if (!files.length) {
 	console.error(`minify-vendor: no .js under ${root} — the vendored editor is not where it was staged`);
 	process.exit(1);

@@ -73,20 +73,14 @@ node "$ROOT/tools/minify-js.mjs" "$VIEW"
 node "$ROOT/tools/minify-vendor.mjs" "$VIEW/vendor/pce"
 
 # The menu node and the ACL, which the router parses as JSON and nobody reads by hand on a router:
-# 520 bytes of tab-indented text where 320 will do. Reparsed and compared after, because a package
-# whose ACL failed to parse would leave the page reachable and every call answering "access denied".
+# 520 bytes of tab-indented text where 320 will do. Parsed first, because a package whose ACL failed
+# to parse would leave the page reachable and every call answering "access denied" — a source file
+# that is not JSON stops the build here instead.
 node -e '
-const { readdirSync, readFileSync, writeFileSync, statSync } = require("fs");
-const walk = (d) => readdirSync(d).forEach((f) => {
-  const p = d + "/" + f;
-  if (statSync(p).isDirectory()) return walk(p);
-  if (!p.endsWith(".json")) return;
-  const was = JSON.parse(readFileSync(p, "utf8"));
-  const min = JSON.stringify(was);
-  if (JSON.stringify(JSON.parse(min)) !== JSON.stringify(was)) throw new Error(p + ": reparse differs");
-  writeFileSync(p, min + "\n");
-});
-walk(process.argv[1]);
+const { readdirSync, readFileSync, writeFileSync } = require("fs");
+const dir = process.argv[1];
+for (const f of readdirSync(dir, { recursive: true }).filter((f) => f.endsWith(".json")))
+  writeFileSync(dir + "/" + f, JSON.stringify(JSON.parse(readFileSync(dir + "/" + f, "utf8"))) + "\n");
 ' "$STAGE/usr/share"
 
 # Only OUR stylesheet. The vendored CSS beside it (layout.css, search.css, the two themes) already
