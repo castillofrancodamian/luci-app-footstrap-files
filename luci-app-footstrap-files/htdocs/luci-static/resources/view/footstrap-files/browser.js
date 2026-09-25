@@ -205,13 +205,6 @@ function extOf(name) {
 	return (ext.length <= 4 && (/^[a-z0-9]+$/).test(ext)) ? ext : '';
 }
 
-/* SVG NEEDS ITS OWN NAMESPACE. luci-base's `E()` builds elements with `document.createElement`,
- * which produces an unknown HTML element for `<svg>`/`<path>` — it lands in the DOM, matches the
- * selector, occupies no pixels and draws nothing. Measured: the icons were in the markup and the
- * page showed none of them. Four lines of `createElementNS` are the whole fix. */
-/* A file name can hold anything a filesystem allows, quotes included, and it is used as a selector
- * value when the keyboard moves focus. `CSS.escape` is on every browser this package runs on; the
- * fallback is there because a missing global would throw inside a keydown handler. */
 /* `metaKey || (ctrlKey && !mac)`, never ctrlKey alone: on macOS Ctrl+click is the SYSTEM's context
  * menu and the click may never arrive, so reading ctrlKey there would be reading a gesture that
  * means something else entirely. Two callers ask this — a click on a row, and the rubber band. */
@@ -221,10 +214,10 @@ function metaOf(ev) {
 	return ev.metaKey || (ev.ctrlKey && !MAC);
 }
 
-function cssEscape(s) {
-	return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
-}
-
+/* SVG NEEDS ITS OWN NAMESPACE. luci-base's `E()` builds elements with `document.createElement`,
+ * which produces an unknown HTML element for `<svg>`/`<path>` — it lands in the DOM, matches the
+ * selector, occupies no pixels and draws nothing. Measured: the icons were in the markup and the
+ * page showed none of them. Four lines of `createElementNS` are the whole fix. */
 function svg(tag, attrs, kids) {
 	const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
 	for (const k in attrs) if (attrs[k] != null) el.setAttribute(k, attrs[k]);
@@ -232,7 +225,7 @@ function svg(tag, attrs, kids) {
 	return el;
 }
 
-/* One size per place, named rather than repeated: 22px beside a name in the list, 40px on a tile.
+/* One size per place, named rather than repeated: 39px beside a name in the list, 78px on a tile.
  * The extension label is drawn from 24px up — below that it is smaller than the smallest legible
  * text and reads as dirt on the glyph. */
 const ICON_LIST = 39;
@@ -288,10 +281,12 @@ const BAR = {
  * are the secondary reading of it. */
 const ROW_ICON = 16;
 
+const FOLDER = 'M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z';
+
 const ICON = {
 	dir(size) {
 		return svg('svg', { class: 'fsf-icon', viewBox: '0 0 24 24', width: size, height: size, 'aria-hidden': 'true' }, [
-			svg('path', { fill: INK.dir, d: 'M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z' }),
+			svg('path', { fill: INK.dir, d: FOLDER }),
 		]);
 	},
 
@@ -303,7 +298,7 @@ const ICON = {
 			svg('path', {
 				fill: INK.link,
 				d: toDir
-					? 'M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z'
+					? FOLDER
 					: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 2 4.5 4.5H14V4z',
 			}),
 			svg('path', { fill: 'currentColor', d: 'M8 16h5l-1.8-1.8 1.4-1.4L16.8 17l-4.2 4.2-1.4-1.4L13 18H8z' }),
@@ -353,8 +348,30 @@ const ICON = {
 	},
 };
 
+/* `user:group` as ubus reports it, falling back to the numeric ids when a name is missing. */
+function ownerOf(entry, dflt) {
+	return '%s:%s'.format(entry.user ?? entry.uid ?? dflt, entry.group ?? entry.gid ?? dflt);
+}
+
+/* HASH TO PATH, DECODED BEFORE IT IS JUDGED: the fragment this view writes is percent-encoded, so
+ * testing the raw string for a leading slash rejects every path it produced itself and the reader
+ * always lands back at `/`. */
+function hashPath() {
+	let at = (location.hash || '').replace(/^#/, '');
+	try { at = decodeURIComponent(at); } catch (e) { at = ''; }
+	return at.startsWith('/') ? at : '/';
+}
+
 function fail(what, err) {
 	ui.addNotification(null, E('p', '%s: %s'.format(what, err && err.message ? err.message : err)), 'error');
+}
+
+/* `fs.exec` with its failure reported under `what`: resolves true on exit 0 and false otherwise, so
+ * a caller can stop a chain or skip a refresh without looking at the reply itself. */
+function run(cmd, args, what) {
+	return fs.exec(cmd, args)
+		.then((r) => r.code === 0 || (fail(what, r.stderr || 'exit %d'.format(r.code)), false))
+		.catch((err) => (fail(what, err), false));
 }
 
 return view.extend({
@@ -392,12 +409,7 @@ return view.extend({
 		/* The path lives in the URL fragment, so a browser reload, a bookmark and the back button
 		 * all return to the directory the reader was in. It is read once here and written by
 		 * `go()`; nothing else touches `location`. */
-		/* DECODED BEFORE IT IS JUDGED: the fragment this view writes is percent-encoded, so testing
-		 * the raw string for a leading slash rejects every path it produced itself and the reader
-		 * always lands back at `/`. */
-		let at = (location.hash || '').replace(/^#/, '');
-		try { at = decodeURIComponent(at); } catch (e) { at = ''; }
-		this.path = at.startsWith('/') ? at : '/';
+		this.path = hashPath();
 		this.selection = new Set();
 		return fs.list(this.path).catch((err) => { fail(_('Cannot read %s').format(this.path), err); return []; });
 	},
@@ -437,7 +449,7 @@ return view.extend({
 		 * them makes a breadcrumb, a `join()` and the selection's own paths agree with the listing.
 		 * The root is the one path that IS a slash. */
 		this.path = (path || '/').replace(/(.)\/+$/, '$1');
-		location.hash = '#' + encodeURIComponent(this.path);
+		location.hash = this.href(this.path);
 		return this.refresh();
 	},
 
@@ -641,9 +653,7 @@ return view.extend({
 				window.removeEventListener('hashchange', onHash);
 				return;
 			}
-			let at = (location.hash || '').replace(/^#/, '');
-			try { at = decodeURIComponent(at); } catch (e) { at = ''; }
-			const want = at.startsWith('/') ? at : '/';
+			const want = hashPath();
 			if (want !== this.path) { this.path = want; this.refresh(); }
 		};
 		window.addEventListener('hashchange', onHash);
@@ -676,10 +686,7 @@ return view.extend({
 	 * strings. */
 	rows() {
 		const rows = [];
-		const rowBtn = (icon, label, fn, cls) => E('button', {
-			class: 'btn cbi-button' + (cls ? ' ' + cls : ''), title: label, 'aria-label': label,
-			click: ui.createHandlerFn(this, fn),
-		}, barIcon(BAR[icon], ROW_ICON));
+		const rowBtn = (icon, label, fn, cls) => this.barButton(icon, label, fn, cls, false, ROW_ICON);
 		if (this.path !== '/') {
 			/* `..` IS A DROP TARGET TOO. Moving something up is as ordinary as moving it down, and
 			 * without this the only way out of a directory was the clipboard. It is not a drag
@@ -735,10 +742,12 @@ return view.extend({
 						this.selectMode ? E('input', {
 							type: 'checkbox', 'aria-label': _('Select %s').format(entry.name),
 							checked: this.selection.has(full) ? '' : null,
-							click: L.bind((p, ev) => {
+							click: (ev) => {
 								ev.stopPropagation();
-								this.toggle(p, ev.target.checked, index);
-							}, this, full),
+								this.select(full, ev.target.checked);
+								this.anchor = full;
+								this.paintSelection();
+							},
 						}) : '',
 						ICON.for(entry, ICON_LIST),
 						name,
@@ -748,7 +757,7 @@ return view.extend({
 				E('td', { class: 'td', 'data-title': _('Size') }, fmtSize(entry)),
 				E('td', { class: 'td', 'data-title': _('Permissions') }, [
 					E('span', { class: 'fsf-mode' }, fmtMode(entry)),
-					E('span', { class: 'fsf-owner' }, ' %s:%s'.format(entry.user ?? entry.uid ?? '', entry.group ?? entry.gid ?? '')),
+					E('span', { class: 'fsf-owner' }, ' ' + ownerOf(entry, '')),
 				]),
 				E('td', { class: 'td', 'data-title': _('Modified') }, fmtTime(entry)),
 				/* The same five actions as icons, named in `title` and `aria-label`: five words per
@@ -833,10 +842,15 @@ return view.extend({
 	 * refused with a reason rather than opened as mojibake. */
 	MAX_EDIT: 1024 * 1024,
 
+	/* True, with the reason shown, when a file is past what either editor opens. */
+	tooBig(entry, what) {
+		if (!entry || entry.size <= this.MAX_EDIT) return false;
+		fail(what.format(entry.name), _('The file is %.1f MB; this editor opens files up to 1 MB.').format(entry.size / 1048576));
+		return true;
+	},
+
 	edit(path, entry) {
-		if (entry && entry.size > this.MAX_EDIT)
-			return fail(_('Cannot edit %s').format(entry.name),
-				_('The file is %.1f MB; this editor opens files up to 1 MB.').format(entry.size / 1048576));
+		if (this.tooBig(entry, _('Cannot edit %s'))) return;
 
 		/* THE EDITOR IS FETCHED WHEN A FILE IS OPENED, not with the listing. It used to be a
 		 * `require` pragma, which means LuCI loads it — and grammars.js behind it — for every
@@ -992,9 +1006,7 @@ return view.extend({
 	/* THE HEX EDITOR IS FETCHED WHEN IT IS OPENED, not with the page: a reader who never looks at a
 	 * binary never pays for it. `L.require` resolves the same module path the pragmas use. */
 	hexEdit(path, entry) {
-		if (entry && entry.size > this.MAX_EDIT)
-			return fail(_('Cannot open %s').format(entry.name),
-				_('The file is %.1f MB; this editor opens files up to 1 MB.').format(entry.size / 1048576));
+		if (this.tooBig(entry, _('Cannot open %s'))) return;
 
 		return Promise.all([
 			L.require('view.footstrap-files.hex'),
@@ -1049,8 +1061,8 @@ return view.extend({
 		};
 		/* An empty file still has to be written, or Save on a file whose every byte was deleted
 		 * would do nothing at all. */
-		const run = bytes.length ? step() : this.writeBytes(path, '', false, true);
-		return run.then(() => {
+		const writing = bytes.length ? step() : this.writeBytes(path, '', false, true);
+		return writing.then(() => {
 			status.textContent = _('Saved.');
 			return this.refresh();
 		}).catch((err) => { status.textContent = ''; fail(_('Cannot save %s').format(path), err); });
@@ -1085,7 +1097,7 @@ return view.extend({
 	properties(path, entry) {
 		const mode = E('input', { type: 'text', class: 'cbi-input-text', value: octal(entry), size: 6 });
 		const owner = E('input', { type: 'text', class: 'cbi-input-text',
-			value: '%s:%s'.format(entry.user ?? entry.uid ?? 'root', entry.group ?? entry.gid ?? 'root') });
+			value: ownerOf(entry, 'root') });
 		const recurse = E('input', { type: 'checkbox' });
 
 		ui.showModal([ _('Properties of %s').format(entry.name) ], [
@@ -1123,15 +1135,12 @@ return view.extend({
 			return fail(_('Cannot change permissions'), _('Permissions must be three or four octal digits, e.g. 644.'));
 		if (mode && mode !== octal(entry))
 			jobs.push([ '/bin/chmod', recurse ? [ '-R', '--', mode, path ] : [ '--', mode, path ] ]);
-		const was = '%s:%s'.format(entry.user ?? entry.uid ?? '', entry.group ?? entry.gid ?? '');
-		if (owner && owner !== was)
+		if (owner && owner !== ownerOf(entry, ''))
 			jobs.push([ '/bin/chown', recurse ? [ '-R', '--', owner, path ] : [ '--', owner, path ] ]);
 		if (!jobs.length) return;
 
-		return jobs.reduce((chain, [ cmd, args ]) => chain.then((ok) => ok === false ? false : fs.exec(cmd, args)
-			.then((r) => (r.code === 0) || (fail(_('Cannot change %s').format(entry.name), r.stderr || 'exit %d'.format(r.code)), false))
-			.catch((err) => (fail(_('Cannot change %s').format(entry.name), err), false))), Promise.resolve(true))
-			.then(() => this.refresh());
+		return jobs.reduce((chain, [ cmd, args ]) => chain.then((ok) => ok && run(cmd, args, _('Cannot change %s').format(entry.name))),
+			Promise.resolve(true)).then(() => this.refresh());
 	},
 
 	/* COPY AND MOVE, as a clipboard rather than as a per-row action: the destination of a copy is
@@ -1165,29 +1174,27 @@ return view.extend({
 		const dest = this.path;
 		const cmd = c.op === 'copy' ? '/bin/cp' : '/bin/mv';
 		const flags = c.op === 'copy' ? [ '-a', '-n' ] : [ '-n' ];
-		return c.paths.reduce((chain, p) => chain.then(() => {
-			const name = p.split('/').pop();
-			const target = join(dest, name);
-			if (p === target)
-				return fail(_('Cannot paste'), _('Source and destination are the same directory.'));
-			/* ASKED BEFORE, not only guarded by `-n`. Both `cp -n` and `mv -n` SKIP an existing
-			 * destination and exit 0, so the reader who is not told sees a paste that reported
-			 * nothing and did nothing — measured: a file moved onto its own name stayed where it
-			 * was, with no message anywhere. `-n` stays on the command as the second line: between
-			 * this check and the copy, something else may create the name. */
-			return fs.stat(target).then(() => true, () => false).then((exists) => {
-				if (exists)
-					return fail(_('%s was not pasted').format(name),
-						_('Something with that name is already here, and nothing is overwritten.'));
-				return fs.exec(cmd, flags.concat([ '--', p, dest + '/' ]))
-					.then((r) => { if (r.code !== 0) fail(_('Cannot paste %s').format(p), r.stderr || 'exit %d'.format(r.code)); })
-					.catch((err) => fail(_('Cannot paste %s').format(p), err));
-			});
-		}), Promise.resolve()).then(() => {
+		return c.paths.reduce((chain, p) => chain.then(() => (parent(p) === dest)
+			? fail(_('Cannot paste'), _('Source and destination are the same directory.'))
+			: this.transferOne(p, dest, cmd, flags, [ _('%s was not pasted'), _('Cannot paste %s') ])),
+		Promise.resolve()).then(() => {
 			if (c.op === 'move') this.clipboard = null;
 			this.drawBar();
 			return this.refresh();
 		});
+	},
+
+	/* One path of a paste or a drop. ASKED BEFORE, not only guarded by `-n`: both `cp -n` and
+	 * `mv -n` SKIP an existing destination and exit 0, so the reader who is not told sees a paste
+	 * that reported nothing and did nothing — measured: a file moved onto its own name stayed where
+	 * it was, with no message anywhere. `-n` stays on the command as the second line: between this
+	 * check and the copy, something else may create the name. The last argument is the caller's
+	 * wording for "skipped" and "failed", each taking the name. */
+	transferOne(p, dest, cmd, flags, [ skipped, cannot ]) {
+		const name = p.split('/').pop();
+		return fs.stat(join(dest, name)).then(() => true, () => false).then((exists) => exists
+			? fail(skipped.format(name), _('Something with that name is already here, and nothing is overwritten.'))
+			: run(cmd, flags.concat([ '--', p, dest + '/' ]), cannot.format(name)));
 	},
 
 	rename(path, name) {
@@ -1196,9 +1203,8 @@ return view.extend({
 		if (to.includes('/')) return fail(_('Cannot rename %s').format(name), _('A name may not contain a slash.'));
 		/* ARGUMENT ARRAY, and `--` before the operands: a file named `-f` is then a file and not a
 		 * flag to mv. */
-		return fs.exec('/bin/mv', [ '-n', '--', path, join(this.path, to) ])
-			.then((r) => (r.code === 0) ? this.refresh() : fail(_('Cannot rename %s').format(name), r.stderr || ('exit %d'.format(r.code))))
-			.catch((err) => fail(_('Cannot rename %s').format(name), err));
+		return run('/bin/mv', [ '-n', '--', path, join(this.path, to) ], _('Cannot rename %s').format(name))
+			.then((ok) => ok && this.refresh());
 	},
 
 	/* DELETING A DIRECTORY TAKES EVERYTHING INSIDE IT, AND ubus DOES NOT ARGUE. This page used to
@@ -1239,9 +1245,7 @@ return view.extend({
 					if (!confirm(_('%s could not be removed (%s). Delete it and everything inside?')
 						.format(b.p, b.err && b.err.message ? b.err.message : b.err)))
 						return;
-					return fs.exec('/bin/rm', [ '-r', '--', b.p ])
-						.then((r) => { if (r.code !== 0) fail(_('Cannot delete %s').format(b.p), r.stderr || 'exit %d'.format(r.code)); })
-						.catch((err) => fail(_('Cannot delete %s').format(b.p), err));
+					return run('/bin/rm', [ '-r', '--', b.p ], _('Cannot delete %s').format(b.p));
 				}), Promise.resolve());
 				return chain.then(() => { if (this.selectMode) this.exitSelect(); return this.refresh(); });
 			});
@@ -1250,9 +1254,8 @@ return view.extend({
 	mkdir() {
 		const name = prompt(_('New directory name:'), '');
 		if (!name || name.includes('/')) return;
-		return fs.exec('/bin/mkdir', [ '--', join(this.path, name) ])
-			.then((r) => (r.code === 0) ? this.refresh() : fail(_('Cannot create directory'), r.stderr || ('exit %d'.format(r.code))))
-			.catch((err) => fail(_('Cannot create directory'), err));
+		return run('/bin/mkdir', [ '--', join(this.path, name) ], _('Cannot create directory'))
+			.then((ok) => ok && this.refresh());
 	},
 
 	touch() {
@@ -1291,11 +1294,6 @@ return view.extend({
 		}), Promise.resolve()).then(() => { this.busy(''); return this.refresh(); });
 	},
 
-	upload(ev) {
-		const input = ev.target;
-		return this.uploadFiles(input.files).then(() => { input.value = ''; });
-	},
-
 	/* One line that says what the page is doing, in the toolbar where the reader already is. Not a
 	 * notification: an upload of six files would print six of them and push the listing off screen. */
 	busy(text) {
@@ -1307,11 +1305,7 @@ return view.extend({
 	 * Dropping onto a DIRECTORY row uploads into that directory; dropping anywhere else on the
 	 * listing uploads into the directory being shown. `dragover` must preventDefault or the browser
 	 * opens the file instead, and `dropEffect` is what makes the cursor say "copy" rather than the
-	 * ambiguous arrow.
-	 *
-	 * `dragenter`/`dragleave` are counted rather than paired: they fire for every child the pointer
-	 * crosses, so a naive pair leaves the highlight on after the pointer has left a row with cells
-	 * in it. */
+	 * ambiguous arrow. */
 	/* TWO KINDS OF DROP LAND ON THE SAME TARGETS. One comes from the operating system and carries
 	 * `dataTransfer.files` — that is an upload, and it is what this page has always done. The other
 	 * comes from a row of this very listing and carries nothing but a promise: `dataTransfer` refuses
@@ -1397,7 +1391,7 @@ return view.extend({
 		el.addEventListener('dragend', () => { this._dragging = null; this.clearDrops(); });
 	},
 
-	/* `mv -n`, the same command a paste runs, with the two refusals a drag can walk into and a
+	/* `mv -n` through `transferOne`, the same path a paste takes, with the two refusals a drag can walk into and a
 	 * paste cannot: a directory dropped on itself, and a directory dropped inside its own subtree —
 	 * `mv /etc /etc/config` would take the source away with it. */
 	moveInto(paths, dest) {
@@ -1413,17 +1407,9 @@ return view.extend({
 		 * question anybody can answer. */
 		if (!confirm(_('Move %d item(s) to %s?').format(list.length, dest))) return Promise.resolve();
 		this.busy(_('Moving %d item(s)…').format(list.length));
-		return list.reduce((chain, p) => chain.then(() => {
-			const name = p.split('/').pop();
-			return fs.stat(join(dest, name)).then(() => true, () => false).then((exists) => {
-				if (exists)
-					return fail(_('%s was not moved').format(name),
-						_('Something with that name is already here, and nothing is overwritten.'));
-				return fs.exec('/bin/mv', [ '-n', '--', p, dest ])
-					.then((r) => { if (r.code !== 0) fail(_('Cannot move %s').format(name), r.stderr || 'exit %d'.format(r.code)); })
-					.catch((err) => fail(_('Cannot move %s').format(name), err));
-			});
-		}), Promise.resolve()).then(() => {
+		return list.reduce((chain, p) => chain.then(() =>
+			this.transferOne(p, dest, '/bin/mv', [ '-n' ], [ _('%s was not moved'), _('Cannot move %s') ])),
+		Promise.resolve()).then(() => {
 			this.busy('');
 			if (this.selectMode) this.exitSelect(); else this.selection = new Set();
 			return this.refresh();
@@ -1514,11 +1500,15 @@ return view.extend({
 	 * Only rows and tiles take the button. Everywhere else on the page the browser's own menu opens,
 	 * because a file manager that eats "Reload" and "Inspect" everywhere is worse than one without a
 	 * menu of its own. */
-	menuFor(entry, full) {
-		const item = (label, fn, cls) => E('button', {
+	menuItem(label, fn, cls) {
+		return E('button', {
 			class: 'fsf-menu-item' + (cls ? ' ' + cls : ''),
 			click: ui.createHandlerFn(this, () => { this.closeMenu(); return fn(); }),
 		}, label);
+	},
+
+	menuFor(entry, full) {
+		const item = this.menuItem.bind(this);
 
 		const dir = isDir(entry);
 		/* A menu opened on something that is already ticked acts on the WHOLE selection — Explorer's
@@ -1560,10 +1550,7 @@ return view.extend({
 	/* The menu for the directory itself, on the listing's empty space: what a reader reaches for
 	 * when nothing is under the finger — make something here, paste what was marked elsewhere. */
 	menuForHere() {
-		const item = (label, fn) => E('button', {
-			class: 'fsf-menu-item',
-			click: ui.createHandlerFn(this, () => { this.closeMenu(); return fn(); }),
-		}, label);
+		const item = this.menuItem.bind(this);
 		return [
 			item(_('New folder'), () => this.mkdir()),
 			item(_('New file'), () => this.touch()),
@@ -1777,7 +1764,7 @@ return view.extend({
 				for (let i = lo; i <= hi; i++) this.selection.add(this.order[i]);
 				this.paintSelection();
 			}
-			const el = this.listing.querySelector('[data-path="' + cssEscape(this.order[next]) + '"]');
+			const el = this.listing.querySelector('[data-path="' + CSS.escape(this.order[next]) + '"]');
 			if (el) el.focus();
 		}
 	},
@@ -1797,12 +1784,6 @@ return view.extend({
 			if (box) box.checked = on;
 		}
 		this.drawBar();
-	},
-
-	toggle(path, on, index) {
-		this.select(path, on);
-		this.anchor = path;
-		this.paintSelection();
 	},
 
 	selectAll() {
@@ -1858,9 +1839,9 @@ return view.extend({
 				tabindex: '0', role: 'option', 'data-path': full,
 				'aria-selected': String(this.selection.has(full)),
 				title: '%s — %s%s'.format(entry.name, fmtMode(entry), dir ? '' : ', ' + fmtSize(entry)),
-				click: L.bind((ev) => this.activate(ev, entry, full, index), this),
-				keydown: L.bind((ev) => this.onKey(ev, entry, full, index), this),
-				contextmenu: L.bind((ev) => this.openMenu(ev, entry, full), this),
+				click: (ev) => this.activate(ev, entry, full, index),
+				keydown: (ev) => this.onKey(ev, entry, full, index),
+				contextmenu: (ev) => this.openMenu(ev, entry, full),
 			}, [
 				ICON.for(entry, ICON_TILE),
 				E('span', { class: 'fsf-tile-name' }, entry.name),
@@ -1907,12 +1888,12 @@ return view.extend({
 	 *
 	 * `pathInput`, the two view buttons and the status span are the SAME nodes in both states —
 	 * re-inserted, not rebuilt — so a half-typed path survives the swap. */
-	barButton(icon, label, fn, cls, off) {
+	barButton(icon, label, fn, cls, off, size) {
 		return E('button', {
 			class: 'btn cbi-button' + (cls ? ' ' + cls : ''), title: label, 'aria-label': label,
 			disabled: off ? '' : null,
 			click: ui.createHandlerFn(this, fn),
-		}, barIcon(BAR[icon]));
+		}, barIcon(BAR[icon], size));
 	},
 
 	drawBar() {
@@ -1984,7 +1965,7 @@ return view.extend({
 				barIcon(BAR.upload),
 				E('input', {
 					type: 'file', multiple: '', style: 'display:none', 'aria-label': _('Upload'),
-					change: ui.createHandlerFn(this, this.upload),
+					change: ui.createHandlerFn(this, (ev) => this.uploadFiles(ev.target.files).then(() => { ev.target.value = ''; })),
 				}),
 			]),
 			this.modeButtons[0],

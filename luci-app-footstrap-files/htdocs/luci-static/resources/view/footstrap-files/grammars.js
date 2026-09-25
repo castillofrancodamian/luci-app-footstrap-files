@@ -78,6 +78,8 @@ const JSON_ = {
  * scripts are made of. What is deliberately absent is everything Prism's bash grammar carries for
  * an interactive shell — here-docs, process substitution, arithmetic — which no file under /etc on
  * this box uses and which cost 5 KB to describe. */
+const VAR = /\$(?:\{[^}\n]*\}|[\w@#?*!$-]+)/g;
+
 const SHELL = {
 	shebang: { pattern: /^#!.*/, alias: 'comment' },
 	comment: { pattern: /(?:^|[ \t])#.*/g, greedy: true },
@@ -91,9 +93,9 @@ const SHELL = {
 		pattern: /"(?:\\.|[^"\\])*"/g,
 		greedy: true,
 		alias: 'string',
-		inside: { variable: /\$(?:\{[^}\n]*\}|[\w@#?*!$-]+)/g },
+		inside: { variable: VAR },
 	},
-	variable: /\$(?:\{[^}\n]*\}|[\w@#?*!$-]+)/g,
+	variable: VAR,
 	keyword: /\b(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|in|function|return|local|export|readonly|break|continue|exit|trap)\b/g,
 	builtin: /\b(?:echo|printf|test|cd|read|set|unset|eval|exec|shift|source|sleep|kill|logger|uci|ubus|opkg|apk|service|reload_config)\b/g,
 	number: /\b\d+\b/g,
@@ -107,7 +109,7 @@ return baseclass.extend({
 	 * outside it needs. */
 	register(languages) {
 		languages.uci = UCI;
-		languages.shell = languages.sh = languages.bash = SHELL;
+		languages.shell = SHELL;
 		languages.json = JSON_;
 	},
 });

@@ -31,32 +31,8 @@
  * cascade layer order cannot be inverted from here (footstrap docs/css.md). That is the property
  * that ruled out Ace, whose sheets land first in <head> unless `useStrictCSP` is set. */
 
-/* Under `resources/view/<app>/`, which is where a LuCI app keeps what belongs to one view — the
- * shape stock luci-app-filemanager uses for its own HexEditor, and what the theme's app guide asks
- * for. A library in a SHARED path (`/luci-static/resources/codemirror/`, as AdGuardHome ships it) is
- * overwritten by the next app that vendors a different version of the same thing. */
-/* ---- E(), WITH THE MARKUP SINK CLOSED ---------------------------------------------------------
- *
- * THIS PACKAGE'S CENTRAL CLAIM WAS FALSE UNTIL THIS SHIM. luci-base's `E()` is
- * `L.dom.create(...)`, which ends in `dom.append(node, children)`:
- *
- *     if (Array.isArray(children)) { … node.appendChild(document.createTextNode(`${children[i]}`)); }
- *     …
- *     else if (children !== null && children !== undefined) { node.innerHTML = `${children}`; }
- *
- * Only the ARRAY branch makes text. A bare string child is assigned to `innerHTML` — so
- * `E('span', {}, entry.name)` was a markup sink, and a file called `a<img src=q onerror=…>.txt`
- * executed its own name in the admin session the moment its directory was listed. Verified on the
- * stand before this shim went in: `window.__pwned` came back true, with this page's ACL
- * (`file: {"/*": [list, read, write, exec]}`) behind whatever ran.
- *
- * The CI grep for `innerHTML` could never have caught it: the sink is inside luci-base, not here.
- *
- * The fix is one function rather than a hundred call sites, because a rule that has to be
- * remembered at every call is a rule that will be forgotten at one of them. This SHADOWS the global
- * `E` for the whole module, so every existing and future call goes through it: a primitive last
- * argument is wrapped in an array — the branch that builds a text node — while an object (the
- * attribute table, a DOM node, an array of children) passes through untouched. */
+/* E() WITH THE MARKUP SINK CLOSED: a primitive last argument becomes a text node, never
+ * innerHTML. The reasoning, and the stand proof, are on the same shim in browser.js. */
 function E() {
 	const args = Array.prototype.slice.call(arguments);
 	const last = args.length - 1;
@@ -65,6 +41,10 @@ function E() {
 	return window.E.apply(null, args);
 }
 
+/* Under `resources/view/<app>/`, which is where a LuCI app keeps what belongs to one view — the
+ * shape stock luci-app-filemanager uses for its own HexEditor, and what the theme's app guide asks
+ * for. A library in a SHARED path (`/luci-static/resources/codemirror/`, as AdGuardHome ships it) is
+ * overwritten by the next app that vendors a different version of the same thing. */
 const V = L.resource('view/footstrap-files/vendor/pce');
 
 /* UCI HAS ITS OWN GRAMMAR NOW. It used to be highlighted as shell, which was the closest thing the
@@ -73,32 +53,15 @@ const V = L.resource('view/footstrap-files/vendor/pce');
  * /etc/config/network, 9 tokens in 120 lines, because INI wants `key=value` and `[section]`.
  *
  * `ini` and `nginx` had grammars of their own and no longer do: a router that has nginx at all is
- * rare, `.ini` rarer still, and both are closer to shell than either was to uci. */
-/* A NULL PROTOTYPE, BECAUSE THE KEY IS THE FILE'S OWN EXTENSION. `BY_EXT[ext]` is indexed with
- * whatever follows the last dot in a name off the router, and a plain object literal answers
- * `constructor` with a function — which `?? 'shell'` does not replace, a function being anything but
- * nullish. `knownLanguage()` below catches it a second time (the value is not in GRAMMARS, so the
- * language comes out null), but a table that answers questions nobody asked it is the wrong half of
- * that pair to rely on. A file called `x.constructor` is all it takes to ask. */
-const BY_EXT = Object.assign(Object.create(null), {
-	json: 'json', sh: 'shell', conf: 'shell', ini: 'shell', nginx: 'shell',
-});
-
-const BY_PATH = [
-	[ /^\/etc\/config\//, 'uci' ],
-	[ /^\/etc\/(?:init|rc|hotplug)/, 'shell' ],
-];
+ * rare, `.ini` rarer still, and both are closer to shell than either was to uci.
+ *
+ * EVERY LANGUAGE HERE IS ONE grammars.js REGISTERS, so nothing is fetched and nothing can 404:
+ * anything that is not uci or json is edited as shell. */
 
 function languageFor(path) {
-	for (const [ re, lang ] of BY_PATH) if (re.test(path)) return lang;
-	const ext = (path.split('/').pop().split('.').pop() || '').toLowerCase();
-	return BY_EXT[ext] ?? 'shell';
+	if ((/^\/etc\/config\//).test(path)) return 'uci';
+	return (/\.json$/i).test(path) ? 'json' : 'shell';
 }
-
-/* NO GRAMMAR IS FETCHED ANY MORE. uci, shell and json are all registered from grammars.js, which
- * comes with the editor; a language not among them is edited with no highlighting rather than with
- * a 404 in the console. */
-const GRAMMARS = new Set([ 'uci', 'shell', 'json' ]);
 
 let _loaded = null;
 
@@ -120,24 +83,11 @@ function loadEditor() {
 	return _loaded;
 }
 
-function knownLanguage(lang) {
-	return GRAMMARS.has(lang) ? lang : null;
-}
-
-/* THERE IS NO isDark() ANY MORE, and that is the point. It used to ask the theme which way the page
- * was — `data-darkmode`, then `data-theme`, then `data-bs-theme`, then the luminance of `body` — in
- * order to choose between the library's two GitHub sheets. editor.css replaces both with one file
- * whose colours come from the theme's own export tier, so the theme has already answered the
- * question by the time the editor loads, and it keeps answering it when the reader switches mode
- * with the dialog open. Nothing here has to know.
- *
- */
-
 return baseclass.extend({
 	/* Everything the caller needs: give it a container and a file, get an editor back. The container
 	 * keeps its own stylesheets, so nothing this returns leaks into the document. */
 	open(container, path, text) {
-		const lang = knownLanguage(languageFor(path));
+		const lang = languageFor(path);
 		return loadEditor().then((mods) => {
 			const editor = mods.core.createEditor(container, {
 				language: lang,
@@ -161,6 +111,4 @@ return baseclass.extend({
 			E('link', { rel: 'stylesheet', href: L.resource('view/footstrap-files/editor.css') }),
 		];
 	},
-
-	languageFor: languageFor,
 });

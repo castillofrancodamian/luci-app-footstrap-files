@@ -18,28 +18,8 @@
  * this page already uses to download) and lives as a Uint8Array; nothing here decodes it, because
  * the whole point is the bytes that are not text. The caller reads them back with `value()`. */
 
-/* ---- E(), WITH THE MARKUP SINK CLOSED ---------------------------------------------------------
- *
- * THIS PACKAGE'S CENTRAL CLAIM WAS FALSE UNTIL THIS SHIM. luci-base's `E()` is
- * `L.dom.create(...)`, which ends in `dom.append(node, children)`:
- *
- *     if (Array.isArray(children)) { … node.appendChild(document.createTextNode(`${children[i]}`)); }
- *     …
- *     else if (children !== null && children !== undefined) { node.innerHTML = `${children}`; }
- *
- * Only the ARRAY branch makes text. A bare string child is assigned to `innerHTML` — so
- * `E('span', {}, entry.name)` was a markup sink, and a file called `a<img src=q onerror=…>.txt`
- * executed its own name in the admin session the moment its directory was listed. Verified on the
- * stand before this shim went in: `window.__pwned` came back true, with this page's ACL
- * (`file: {"/*": [list, read, write, exec]}`) behind whatever ran.
- *
- * The CI grep for `innerHTML` could never have caught it: the sink is inside luci-base, not here.
- *
- * The fix is one function rather than a hundred call sites, because a rule that has to be
- * remembered at every call is a rule that will be forgotten at one of them. This SHADOWS the global
- * `E` for the whole module, so every existing and future call goes through it: a primitive last
- * argument is wrapped in an array — the branch that builds a text node — while an object (the
- * attribute table, a DOM node, an array of children) passes through untouched. */
+/* E() WITH THE MARKUP SINK CLOSED: a primitive last argument becomes a text node, never
+ * innerHTML. The reasoning, and the stand proof, are on the same shim in browser.js. */
 function E() {
 	const args = Array.prototype.slice.call(arguments);
 	const last = args.length - 1;
@@ -85,15 +65,20 @@ function ascii(b) {
 	return (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.';
 }
 
+/* The text column of the line that starts at `start`. */
+function textOf(data, start) {
+	let s = '';
+	for (let i = 0; i < ROW && start + i < data.length; i++) s += ascii(data[start + i]);
+	return s;
+}
+
 return baseclass.extend({
-	/* `container` is emptied and filled. Returns a handle: `value()` for the bytes, `dirty()` for
-	 * whether anything was typed. */
+	/* `container` is emptied and filled. Returns a handle whose `value()` is the bytes. */
 	open(container, bytes) {
 		const data = new Uint8Array(bytes);
 		const lines = Math.max(1, Math.ceil(data.length / ROW));
 		let caret = 0;			/* byte the caret is on */
 		let nibble = 0;			/* 0 = the high half of that byte is next, 1 = the low half */
-		let touched = false;
 		let first = -1;			/* first line currently drawn, so a scroll that moves nothing redraws nothing */
 
 		const layer = E('div', { class: 'fsf-hex-layer' });
@@ -121,12 +106,10 @@ return baseclass.extend({
 					'data-at': has ? String(at) : null,
 				}, has ? HEX[data[at]] : '  '));
 			}
-			let text = '';
-			for (let i = 0; i < ROW && start + i < data.length; i++) text += ascii(data[start + i]);
 			return E('div', { class: 'fsf-hex-line' }, [
 				E('span', { class: 'fsf-hex-off' }, (start).toString(16).padStart(8, '0')),
 				E('span', { class: 'fsf-hex-bytes' }, cells),
-				E('span', { class: 'fsf-hex-text' }, text),
+				E('span', { class: 'fsf-hex-text' }, textOf(data, start)),
 			]);
 		};
 
@@ -143,7 +126,7 @@ return baseclass.extend({
 
 		/* The caret is a class on one cell, so moving it redraws nothing but the two cells involved
 		 * — until it leaves the window, which is the only time the lines are rebuilt. */
-		const paint = (from) => {
+		const paint = () => {
 			const old = layer.querySelector('.fsf-hex-at');
 			if (old) old.classList.remove('fsf-hex-at');
 			const now = layer.querySelector('[data-at="' + caret + '"]');
@@ -191,17 +174,12 @@ return baseclass.extend({
 			data[caret] = nibble
 				? ((data[caret] & 0xf0) | d)
 				: ((data[caret] & 0x0f) | (d << 4));
-			touched = true;
 			const cell = layer.querySelector('[data-at="' + caret + '"]');
 			if (cell) {
 				cell.textContent = HEX[data[caret]];
 				cell.classList.add('fsf-hex-edited');
 				/* the text column of that line, rebuilt for the one character that changed */
-				const text = cell.closest('.fsf-hex-line').querySelector('.fsf-hex-text');
-				const start = Math.floor(caret / ROW) * ROW;
-				let s = '';
-				for (let i = 0; i < ROW && start + i < data.length; i++) s += ascii(data[start + i]);
-				text.textContent = s;
+				cell.closest('.fsf-hex-line').querySelector('.fsf-hex-text').textContent = textOf(data, caret - (caret % ROW));
 			}
 			if (nibble) { nibble = 0; if (caret + 1 < data.length) move(caret + 1); }
 			else nibble = 1;
@@ -211,12 +189,7 @@ return baseclass.extend({
 		draw(true);
 		view.focus();
 
-		/* `dirty()` is what a "close without saving" prompt would ask; nothing else here is offered,
-		 * because an accessor nobody calls is a byte on every router that ships it. */
-		return {
-			value: () => data,
-			dirty: () => touched,
-		};
+		return { value: () => data };
 	},
 
 	/* base64 for the ubus `file write`, in chunks small enough for `String.fromCharCode` not to
@@ -227,6 +200,4 @@ return baseclass.extend({
 			s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(to, i + 4096)));
 		return btoa(s);
 	},
-
-	ROW: ROW,
 });
